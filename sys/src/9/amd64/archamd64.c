@@ -38,7 +38,7 @@ cpuidinit(void)
 	if((eax = cpuid(0x80000000, 0, info)) >= 0x80000000)
 		machp()->CPU.ncpuinfoe = (eax & ~0x80000000) + 1;
 
-	/* is mnonitor supported? */
+	/* is monitor supported? */
 	if (machp()->CPU.cpuinfo[1][2] & 8) {
 		cpuid(5, 0, machp()->CPU.cpuinfo[2]);
 		mwait = k10mwait;
@@ -150,9 +150,19 @@ cpuidhz(uint32_t *info0, uint32_t *info1)
 		case 0x00000660:		/* kvm over i5 */
 		case 0x00000670:		/* Core 2 Extreme */
 		case 0x00000650:		/* i5 6xx, i3 5xx */
-		case 0x000006c0:		/* i5 4xxx */
+		case 0x000006c0:		/* i5 4xx */
 		case 0x000006a0:		/* i7 paurea... */
-		case 0x000306a0:		/* i7 Ivy Bridge, Haswell and Broadwell... */
+		case 0x000106a0:		/* i7,5,3 9xx */
+		case 0x000106c0:		/* Atom (45nm, 32nm) */
+		case 0x000106e0:		/* i7,5,3 8xx */
+		case 0x000206a0:		/* i7,5,3 2xxx */
+		case 0x000206c0:		/* i7,5,3 4xxx */
+		case 0x000306a0:		/* i7,5,3 3xxx */
+		case 0x000306f0:		/* i7,5,3 5xxx */
+		case 0x000506e0:		/* i7,5,3 6xxx */
+		case 0x00050650:		/* i9 7900X */
+		case 0x000806e0:		/* i7,5,3 85xx */
+		case 0x000906e0:		/* i7,5,3 77xx 8xxx */
 			/*
 			 * Get the FSB frequemcy.
 			 * If processor has Enhanced Intel Speedstep Technology
@@ -174,6 +184,9 @@ cpuidhz(uint32_t *info0, uint32_t *info1)
 			switch(f){
 			default:
 				return 0;
+			case 7:
+				hz =  83000000000ll;
+				break;
 			case 5:
 				hz = 100000000000ll;
 				break;
@@ -231,6 +244,7 @@ cpuidhz(uint32_t *info0, uint32_t *info1)
 		case 0x00600f20:		/* K10 Opteron 63xx, FX 3xxx/8xxx/9xxx */
 		case 0x00700f00:		/* Athlon II X4 5xxx */
 		case 0x00800f10:		/* Ryzen 5 and 7 */
+		case 0x00810f10:		/* Ryzen 3 */
 			msr = rdmsr(0xc0010064);
 			r = msr & 0x1f;
 			hz = ((r+0x10)*100000000ll)/(1<<(msr>>6 & 0x07));
@@ -243,8 +257,9 @@ cpuidhz(uint32_t *info0, uint32_t *info1)
 		}
 		DBG("cpuidhz: %#llx hz %lld\n", msr, hz);
 	}
-	else
+	else {
 		return 0;
+	}
 
 	return hz;
 }

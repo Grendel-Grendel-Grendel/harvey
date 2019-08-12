@@ -11,7 +11,6 @@
 #include	<libc.h>
 #include	<bio.h>
 #include	<mach.h>
-#include	"elf.h"
 
 /*
  *	All a.out header types.  The dummy entry allows canonical
@@ -36,28 +35,28 @@ typedef struct {
 	int32_t dummy;			/* padding to ensure extra long */
 } ExecHdr;
 
-static	int	elfdotout(int, Fhdr*, ExecHdr*);
-static	void	setsym(Fhdr*, int32_t, int32_t, int32_t, int64_t);
-static	void	setdata(Fhdr*, uint64_t, int32_t, int64_t,
-				  int32_t);
-static	void	settext(Fhdr*, uint64_t, uint64_t, int32_t,
-				  int64_t);
-static	void	hswal(void*, int, uint32_t(*)(uint32_t));
+static int	elfdotout(int, Fhdr*, ExecHdr*);
+static void	setsym(Fhdr*, int32_t, int32_t, int32_t, int64_t);
+static void	setdata(Fhdr*, uint64_t, int32_t, int64_t, int32_t);
+static void	settext(Fhdr*, uint64_t, uint64_t, int32_t, int64_t);
+static void	setstr(Fhdr *fp, int64_t stroff, uint64_t strsz);
+static void	setbssidx(Fhdr *fp, uint16_t bssidx);
+static void	setdbglineidx(Fhdr *fp, uint16_t dbglineidx);
+static void	hswal(void*, int, uint32_t(*)(uint32_t));
 
 /*
  *	definition of per-executable file type structures
  */
 
 typedef struct Exectable{
-	int32_t	magic;			/* big-endian magic number of file */
-	char	*name;			/* executable identifier */
-	char	*dlmname;		/* dynamically loadable module identifier */
-	uint8_t	type;			/* Internal code */
-	uint8_t	_magic;			/* _MAGIC() magic */
-	Mach	*mach;			/* Per-machine data */
-	int32_t	hsize;			/* header size */
-	uint32_t	(*swal)(uint32_t);		/* beswal or leswal */
-	int	(*hparse)(int, Fhdr*, ExecHdr*);
+	int32_t		magic;			/* big-endian magic number of file */
+	char		*name;			/* executable identifier */
+	char		*dlmname;		/* dynamically loadable module identifier */
+	uint8_t		type;			/* Internal code */
+	Mach		*mach;			/* Per-machine data */
+	int32_t		hsize;			/* header size */
+	uint32_t	(*swal)(uint32_t);	/* beswal or leswal */
+	int		(*hparse)(int, Fhdr*, ExecHdr*);
 } ExecTable;
 
 extern	Mach	mamd64;
@@ -68,9 +67,6 @@ ExecTable exectab[] =
 		"elf executable",
 		nil,
 		FNONE,
-		0,
-/*		&mi386,
-		sizeof(Ehdr), */
 		&mamd64,
 		sizeof(E64hdr),
 		nil,
@@ -79,28 +75,6 @@ ExecTable exectab[] =
 };
 
 Mach	*mach = &mamd64;
-
-static ExecTable*
-couldbe4k(ExecTable *mp)
-{
-//	Dir *d;
-	ExecTable *f;
-
-/* undefined for use with kernel
-	if((d=dirstat("/proc/1/regs")) == nil)
-		return mp;
-	if(d->length < 32*8){		/ * R3000 * /
-		free(d);
-		return mp;
-	}
-	free(d); */
-	for (f = exectab; f->magic; f++)
-		if(f->magic == M_MAGIC) {
-			f->name = "mips plan 9 executable on mips2 kernel";
-			return f;
-		}
-	return mp;
-}
 
 int
 crackhdr(int fd, Fhdr *fp)
@@ -121,36 +95,12 @@ crackhdr(int fd, Fhdr *fp)
 		if (nb < mp->hsize)
 			continue;
 
-		/*
-		 * The magic number has morphed into something
-		 * with fields (the straw was DYN_MAGIC) so now
-		 * a flag is needed in Fhdr to distinguish _MAGIC()
-		 * magic numbers from foreign magic numbers.
-		 *
-		 * This code is creaking a bit and if it has to
-		 * be modified/extended much more it's probably
-		 * time to step back and redo it all.
-		 */
-		if(mp->_magic){
-			if(mp->magic != (magic & ~DYN_MAGIC))
-				continue;
+		if(mp->magic != magic)
+			continue;
 
-			if(mp->magic == V_MAGIC)
-				mp = couldbe4k(mp);
-
-			if ((magic & DYN_MAGIC) && mp->dlmname != nil)
-				fp->name = mp->dlmname;
-			else
-				fp->name = mp->name;
-		}
-		else{
-			if(mp->magic != magic)
-				continue;
-			fp->name = mp->name;
-		}
+		fp->name = mp->name;
 		fp->type = mp->type;
 		fp->hdrsz = mp->hsize;		/* will be zero on bootables */
-		fp->_magic = mp->_magic;
 		fp->magic = magic;
 
 		mach = mp->mach;
@@ -183,15 +133,11 @@ hswal(void *v, int n, uint32_t (*swap)(uint32_t))
 static int
 elf64dotout(int fd, Fhdr *fp, ExecHdr *hp)
 {
-	E64hdr *ep;
-	P64hdr *ph;
 	uint16_t (*swab)(uint16_t);
 	uint32_t (*swal)(uint32_t);
 	uint64_t (*swav)(uint64_t);
-	int i, it, id, is, phsz;
-	uint64_t uvl;
 
-	ep = &hp->e.E64hdr;
+	E64hdr *ep = &hp->e.E64hdr;
 	if(ep->ident[DATA] == ELFDATA2LSB) {
 		swab = leswab;
 		swal = leswal;
@@ -204,6 +150,7 @@ elf64dotout(int fd, Fhdr *fp, ExecHdr *hp)
 		werrstr("bad ELF64 encoding - not big or little endian");
 		return 0;
 	}
+	fp->bigendian = ep->ident[DATA] == ELFDATA2MSB;
 
 	ep->type = swab(ep->type);
 	ep->machine = swab(ep->machine);
@@ -231,18 +178,15 @@ elf64dotout(int fd, Fhdr *fp, ExecHdr *hp)
 		fp->type = FAMD64;
 		fp->name = "amd64 ELF64 executable";
 		break;
-	case POWER64:
-		fp->type = FPOWER64;
-		fp->name = "power64 ELF64 executable";
-		break;
 	}
 
+	// Program headers
 	if(ep->phentsize != sizeof(P64hdr)) {
-		werrstr("bad ELF64 header size");
+		werrstr("bad ELF64 program header size");
 		return 0;
 	}
-	phsz = sizeof(P64hdr)*ep->phnum;
-	ph = malloc(phsz);
+	int phsz = sizeof(P64hdr)*ep->phnum;
+	P64hdr *ph = malloc(phsz);
 	if(!ph)
 		return 0;
 	seek(fd, ep->phoff, 0);
@@ -250,7 +194,8 @@ elf64dotout(int fd, Fhdr *fp, ExecHdr *hp)
 		free(ph);
 		return 0;
 	}
-	for(i = 0; i < ep->phnum; i++) {
+
+	for(int i = 0; i < ep->phnum; i++) {
 		ph[i].type = swal(ph[i].type);
 		ph[i].flags = swal(ph[i].flags);
 		ph[i].offset = swav(ph[i].offset);
@@ -262,16 +207,12 @@ elf64dotout(int fd, Fhdr *fp, ExecHdr *hp)
 	}
 
 	/* find text, data and symbols and install them */
-	it = id = is = -1;
-	for(i = 0; i < ep->phnum; i++) {
-		if(ph[i].type == LOAD
-		&& (ph[i].flags & (R|X)) == (R|X) && it == -1)
+	int it = -1, id = -1;
+	for(int i = 0; i < ep->phnum; i++) {
+		if(ph[i].type == LOAD && (ph[i].flags & (R|X)) == (R|X) && it == -1)
 			it = i;
-		else if(ph[i].type == LOAD
-		&& (ph[i].flags & (R|W)) == (R|W) && id == -1)
+		else if(ph[i].type == LOAD && (ph[i].flags & (R|W)) == (R|W) && id == -1)
 			id = i;
-		else if(ph[i].type == NOPTYPE && is == -1)
-			is = i;
 	}
 	if(it == -1 || id == -1) {
 		werrstr("No ELF64 TEXT or DATA sections");
@@ -280,12 +221,113 @@ elf64dotout(int fd, Fhdr *fp, ExecHdr *hp)
 	}
 
 	settext(fp, ep->elfentry, ph[it].vaddr, ph[it].memsz, ph[it].offset);
-	/* 8c: out of fixed registers */
-	uvl = ph[id].memsz - ph[id].filesz;
+	uint64_t uvl = ph[id].memsz - ph[id].filesz;
 	setdata(fp, ph[id].vaddr, ph[id].filesz, ph[id].offset, uvl);
-	if(is != -1)
-		setsym(fp, ph[is].filesz, 0, ph[is].memsz, ph[is].offset);
 	free(ph);
+
+	// Section headers - get the symbol table offset from here
+	if (ep->shentsize != sizeof(S64hdr)) {
+		werrstr("bad ELF64 section header size");
+		return 0;
+	}
+	int shsz = sizeof(S64hdr)*ep->shnum;
+	S64hdr *sh = malloc(shsz);
+	if (!sh) {
+		return 0;
+	}
+	seek(fd, ep->shoff, 0);
+	if (read(fd, sh, shsz) < 0) {
+		free(sh);
+		return 0;
+	}
+
+	for (int i = 0; i < ep->shnum; i++) {
+		sh[i].name = swal(sh[i].name);
+		sh[i].type = swal(sh[i].type);
+		sh[i].flags = swav(sh[i].flags);
+		sh[i].addr = swav(sh[i].addr);
+		sh[i].offset = swav(sh[i].offset);
+		sh[i].size = swav(sh[i].size);
+		sh[i].link = swal(sh[i].link);
+		sh[i].info = swal(sh[i].info);
+		sh[i].addralign = swav(sh[i].addralign);
+		sh[i].entsize = swav(sh[i].entsize);
+	}
+
+	int isym = -1, istr = -1, ibss = -1;
+	for (int i = 0; i < ep->shnum; i++) {
+		if (sh[i].type == SHT_SYMTAB && isym == -1) {
+			// Assume the first is the one we want for now
+			// There may be more than one if it's dynamic, but we
+			// don't support than, so hopefully this is ok for now
+			isym = i;
+		} else if (sh[i].type == SHT_STRTAB && istr == -1) {
+			// Assume first is the one we want for now, but we
+			// should probably check that the name is '.strtab' to
+			// distinguish from .shstrtab.
+			istr = i;
+		} else if (sh[i].type == SHT_NOBITS && ibss == -1) {
+			ibss = i;
+		}
+	}
+
+	if (isym != -1) {
+		//print("isym: %d\n", isym);
+		setsym(fp, sh[isym].size, 0, sh[isym].size, sh[isym].offset);
+	}
+
+	if (istr != -1) {
+		//print("istr: %d\n", istr);
+		setstr(fp, sh[istr].offset, sh[istr].size);
+	}
+
+	if (ibss != -1) {
+		//print("ibss: %d\n", ibss);
+		setbssidx(fp, ibss);
+	}
+
+	// Get sections based on names - load the section string table first
+	if (ep->shstrndx != SHN_UNDEF) {
+		uint64_t shstroff = sh[ep->shstrndx].offset;
+		uint64_t shstrsz = sh[ep->shstrndx].size;
+		char *shstrtab = (char *)malloc(shstrsz);
+		if (shstrtab == 0) {
+			werrstr("can't allocate memory to load section string table");
+			free(sh);
+			return 0;
+		}
+
+		Biobuf b;
+		Binit(&b, fd, OREAD);
+		Bseek(&b, shstroff, 0);
+		if (Bread(&b, shstrtab, shstrsz) != shstrsz) {
+			werrstr("can't read section string table");
+			free(shstrtab);
+			free(sh);
+			return 0;
+		}
+
+		int idbg_line = -1;
+		for (int i = 0; i < ep->shnum; i++) {
+			const char *secname = &shstrtab[sh[i].name];
+			//print("secname[%d] = %s\n", i, secname);
+			if (sh[i].type == SHT_PROGBITS
+				&& !strcmp(".debug_line", secname)
+				&& idbg_line == -1) {
+				idbg_line = i;
+			}
+		}
+
+		if (idbg_line != -1) {
+			//print("idbg_line: %d\n", idbg_line);
+			setdbglineidx(fp, ibss);
+		}
+
+		free(shstrtab);
+	}
+
+	free(sh);
+
 	return 1;
 }
 
@@ -295,18 +337,11 @@ elf64dotout(int fd, Fhdr *fp, ExecHdr *hp)
 static int
 elfdotout(int fd, Fhdr *fp, ExecHdr *hp)
 {
-//	Ehdr *ep;
-	E64hdr *ep;
-
 	/* bitswap the header according to the DATA format */
-	ep = &hp->e.E64hdr;
-//	if(ep->ident[CLASS] == ELFCLASS32)
-//		return elf32dotout(fd, fp, hp);
-//	else if(ep->ident[CLASS] == ELFCLASS64)
+	E64hdr *ep = &hp->e.E64hdr;
 	if(ep->ident[CLASS] == ELFCLASS64)
 		return elf64dotout(fd, fp, hp);
 
-//	werrstr("bad ELF class - not 32- nor 64-bit");
 	werrstr("bad ELF class - not 64-bit");
 	return 0;
 }
@@ -330,8 +365,7 @@ setdata(Fhdr *fp, uint64_t a, int32_t s, int64_t off, int32_t bss)
 }
 
 static void
-setsym(Fhdr *fp, int32_t symsz, int32_t sppcsz, int32_t lnpcsz,
-       int64_t symoff)
+setsym(Fhdr *fp, int32_t symsz, int32_t sppcsz, int32_t lnpcsz, int64_t symoff)
 {
 	fp->symsz = symsz;
 	fp->symoff = symoff;
@@ -339,4 +373,23 @@ setsym(Fhdr *fp, int32_t symsz, int32_t sppcsz, int32_t lnpcsz,
 	fp->sppcoff = fp->symoff+fp->symsz;
 	fp->lnpcsz = lnpcsz;
 	fp->lnpcoff = fp->sppcoff+fp->sppcsz;
+}
+ 
+static void
+setstr(Fhdr *fp, int64_t stroff, uint64_t strsz)
+{
+	fp->stroff = stroff;
+	fp->strsz = strsz;
+}
+
+static void
+setbssidx(Fhdr *fp, uint16_t bssidx)
+{
+	fp->bssidx = bssidx;
+}
+
+static void
+setdbglineidx(Fhdr *fp, uint16_t dbglineidx)
+{
+	fp->dbglineidx = dbglineidx;
 }

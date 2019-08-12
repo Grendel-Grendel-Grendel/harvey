@@ -45,12 +45,3 @@ struct	Exec
 #define	MAX_MAGIC	28			/* <= 90 */
 
 #define	DYN_MAGIC	0x80000000		/* dlm */
-
-typedef	struct	Sym	Sym;
-struct	Sym
-{
-	int64_t	value;
-	uint	sig;
-	char	type;
-	char	*name;
-};

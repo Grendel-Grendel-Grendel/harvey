@@ -28,14 +28,14 @@ typedef struct {
 } E64hdr;
 
 typedef struct {
-	int	type;		/* entry type */
+	int		type;		/* entry type */
 	uint32_t	offset;		/* file offset */
 	uint32_t	vaddr;		/* virtual address */
 	uint32_t	paddr;		/* physical address */
-	int	filesz;		/* file size */
+	int		filesz;		/* file size */
 	uint32_t	memsz;		/* memory size */
-	int	flags;		/* entry flags */
-	int	align;		/* memory/file alignment */
+	int		flags;		/* entry flags */
+	int		align;		/* memory/file alignment */
 } Phdr;
 
 typedef struct {
@@ -74,6 +74,23 @@ typedef struct {
 	uint64_t	addralign;	/* memory alignment */
 	uint64_t	entsize;	/* entry size if table */
 } S64hdr;
+
+typedef struct {
+	uint32_t	st_name;	/* Symbol name */
+	uint8_t		st_info;	/* Type and Binding attributes */
+	uint8_t		st_other;	/* Reserved */
+	uint16_t	st_shndx;	/* Section table index */
+	uint64_t	st_value;	/* Symbol value */
+	uint64_t	st_size;	/* Size of object (e.g., common) */
+} E64Sym;
+
+
+typedef struct Sym {
+	int64_t		value;
+	uint		sig;
+	char		type;
+	char		*name;
+} Sym;
 
 enum {
 	/* Ehdr codes */
@@ -136,13 +153,34 @@ enum {
 	X = 0x1,
 
 	/* Shdr Codes */
-	Progbits = 1,	/* section types */
-	Strtab = 3,
-	Nobits = 8,
+	SHT_PROGBITS = 1,	/* section types */
+	SHT_SYMTAB = 2,
+	SHT_STRTAB = 3,
+	SHT_NOBITS = 8,
 
-	Swrite = 1,	/* section attributes */
+	Swrite = 1,		/* section attributes */
 	Salloc = 2,
 	Sexec = 4,
+
+	STB_LOCAL = 0,		/* Symbol bindings */
+	STB_GLOBAL = 1,
+	STB_WEAK = 2,
+	STB_LOOS = 10,
+	STB_HIOS = 12,
+	STB_LOPROC = 13,
+	STB_HIPROC = 15,
+
+	STT_NOTYPE = 0, 	/* Symbol types */
+	STT_OBJECT = 1,
+	STT_FUNC = 2,
+	STT_SECTION = 3,
+	STT_FILE = 4,
+	STT_LOOS = 10,
+	STT_HIOS = 12,
+	STT_LOPROC = 13,
+	STT_HIPROC = 15,
+
+	SHN_UNDEF = 0,
 };
 
 #define	ELF_MAG		((0x7f<<24) | ('E'<<16) | ('L'<<8) | 'F')

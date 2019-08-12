@@ -46,7 +46,7 @@ main(int argc, char *argv[])
 
 	argv0 = argv[0];
 	pid = 0;
-	aout = "8.out";
+	exe = "8.out";
 	quiet = 1;
 
 	mtype = 0;
@@ -80,27 +80,27 @@ main(int argc, char *argv[])
 
 	if(argc > 0) {
 		if(remote)
-			aout = argv[0];
+			exe = argv[0];
 		else
 		if(isnumeric(argv[0])) {
 			pid = strtol(argv[0], 0, 0);
 			snprint(prog, sizeof(prog), "/proc/%d/text", pid);
-			aout = prog;
+			exe = prog;
 			if(argc > 1)
-				aout = argv[1];
+				exe = argv[1];
 			else if(kernel)
-				aout = system();
+				exe = system();
 		}
 		else {
 			if(kernel) {
 				fprint(2, "acid: -k requires a pid\n");
 				usage();
 			}
-			aout = argv[0];
+			exe = argv[0];
 		}
 	} else
 	if(remote)
-		aout = "/mips/9ch";
+		exe = "/mips/9ch";
 
 	fmtinstall('x', xfmt);
 	fmtinstall('L', Lfmt);
@@ -116,7 +116,7 @@ main(int argc, char *argv[])
 	if(mtype && machbyname(mtype) == 0)
 		print("unknown machine %s", mtype);
 
-	if (attachfiles(aout, pid) < 0)
+	if (attachfiles(exe, pid) < 0)
 		varreg();		/* use default register set on error */
 
 	loadmodule("/sys/lib/acid/port");
@@ -168,21 +168,21 @@ main(int argc, char *argv[])
 }
 
 static int
-attachfiles(char *aout, int pid)
+attachfiles(char *exe, int pid)
 {
 	interactive = 0;
 	if(setjmp(err))
 		return -1;
 
-	if(aout) {				/* executable given */
+	if(exe) {				/* executable given */
 		if(wtflag)
-			text = open(aout, ORDWR);
+			text = open(exe, ORDWR);
 		else
-			text = open(aout, OREAD);
+			text = open(exe, OREAD);
 
 		if(text < 0)
-			error("%s: can't open %s: %r\n", argv0, aout);
-		readtext(aout);
+			error("%s: can't open %s: %r\n", argv0, exe);
+		readtext(exe);
 	}
 	if(pid)					/* pid given */
 		sproc(pid);
@@ -199,8 +199,8 @@ die(void)
 
 	s = look("proclist");
 	if(s && s->v->type == TLIST) {
-		for(f = s->v->l; f; f = f->next)
-			Bprint(bout, "echo kill > /proc/%d/ctl\n", (int)f->ival);
+		for(f = s->v->store.l; f; f = f->next)
+			Bprint(bout, "echo kill > /proc/%d/ctl\n", (int)f->store.ival);
 	}
 	exits(0);
 }
@@ -302,24 +302,24 @@ readtext(char *s)
 	if(mach->sbreg && lookup(0, mach->sbreg, &sym)) {
 		mach->sb = sym.value;
 		l = enter("SB", Tid);
-		l->v->fmt = 'X';
-		l->v->ival = mach->sb;
+		l->v->store.fmt = 'X';
+		l->v->store.ival = mach->sb;
 		l->v->type = TINT;
 		l->v->set = 1;
 	}
 
 	l = mkvar("objtype");
 	v = l->v;
-	v->fmt = 's';
+	v->store.fmt = 's';
 	v->set = 1;
-	v->string = strnode(mach->name);
+	v->store.string = strnode(mach->name);
 	v->type = TSTRING;
 
 	l = mkvar("textfile");
 	v = l->v;
-	v->fmt = 's';
+	v->store.fmt = 's';
 	v->set = 1;
-	v->string = strnode(s);
+	v->store.string = strnode(s);
 	v->type = TSTRING;
 
 	machbytype(fhdr.type);
@@ -333,8 +333,8 @@ an(int op, Node *l, Node *r)
 
 	n = gmalloc(sizeof(Node));
 	memset(n, 0, sizeof(Node));
-	n->gclink = gcl;
-	gcl = n;
+	n->gc.gclink = gcl;
+	gcl = &n->gc;
 	n->op = op;
 	n->left = l;
 	n->right = r;
@@ -349,8 +349,8 @@ al(int t)
 	l = gmalloc(sizeof(List));
 	memset(l, 0, sizeof(List));
 	l->type = t;
-	l->gclink = gcl;
-	gcl = l;
+	l->gc.gclink = gcl;
+	gcl = &l->gc;
 	return l;
 }
 
@@ -360,8 +360,8 @@ con(int64_t v)
 	Node *n;
 
 	n = an(OCONST, ZN, ZN);
-	n->ival = v;
-	n->fmt = 'W';
+	n->store.ival = v;
+	n->store.fmt = 'W';
 	n->type = TINT;
 	return n;
 }
@@ -405,19 +405,19 @@ marktree(Node *n)
 	marktree(n->left);
 	marktree(n->right);
 
-	n->gcmark = 1;
+	n->gc.gcmark = 1;
 	if(n->op != OCONST)
 		return;
 
 	switch(n->type) {
 	case TSTRING:
-		n->string->gcmark = 1;
+		n->store.string->gc.gcmark = 1;
 		break;
 	case TLIST:
-		marklist(n->l);
+		marklist(n->store.l);
 		break;
 	case TCODE:
-		marktree(n->cc);
+		marktree(n->store.cc);
 		break;
 	}
 }
@@ -426,16 +426,16 @@ void
 marklist(List *l)
 {
 	while(l) {
-		l->gcmark = 1;
+		l->gc.gcmark = 1;
 		switch(l->type) {
 		case TSTRING:
-			l->string->gcmark = 1;
+			l->store.string->gc.gcmark = 1;
 			break;
 		case TLIST:
-			marklist(l->l);
+			marklist(l->store.l);
 			break;
 		case TCODE:
-			marktree(l->cc);
+			marktree(l->store.cc);
 			break;
 		}
 		l = l->next;
@@ -467,13 +467,13 @@ gc(void)
 			for(v = f->v; v; v = v->pop) {
 				switch(v->type) {
 				case TSTRING:
-					v->string->gcmark = 1;
+					v->store.string->gc.gcmark = 1;
 					break;
 				case TLIST:
-					marklist(v->l);
+					marklist(v->store.l);
 					break;
 				case TCODE:
-					marktree(v->cc);
+					marktree(v->store.cc);
 					break;
 				}
 			}

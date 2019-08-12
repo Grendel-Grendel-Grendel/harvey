@@ -28,20 +28,24 @@ typedef struct Rdt Rdt;
 extern Atable *apics; 		/* APIC info */
 int mpisabusno = -1;
 
+/* Rbus chains, one for each device bus: each rbus matches a device to an rdt */
 struct Rbus {
 	Rbus	*next;
 	int	devno;
+	int	fno;
 	Rdt	*rdt;
 };
 
+
+/* Each rdt describes an ioapic input pin (intin, from the bus/device) */
 struct Rdt {
-	Apic	*apic;
-	int	intin;
+	Apic		*apic;
+	int		intin;
 	uint32_t	lo;
 	uint32_t	hi;
 
-	int	ref;				/* could map to multiple busses */
-	int	enabled;				/* times enabled */
+	int		ref;			/* could map to multiple busses */
+	int		enabled;		/* times enabled */
 };
 
 enum {						/* IOAPIC registers */
@@ -78,25 +82,27 @@ static int map_edge_level[4] = {
 
 /* TODO: use the slice library for this. */
 typedef struct {
-	Vctl v;
-	uint32_t lo;
-	int valid;
+	Vctl		v;
+	uint32_t	lo;
+	int		valid;
 } Vinfo;
 static Vinfo todo[1<<13];
+static int todoidx = 0;
 /* this is a guess. */
 static char todostring[1024];
 
 char *readtodo(void)
 {
-	int bus, dev, i;
+	int bus, dev, fn, i;
 	char *p = todostring;
 	char *e = p + sizeof(todostring);
-	for(i = 0; i < nelem(todo); i++) {
+	for(i = 0; i < todoidx; i++) {
 		if (!todo[i].valid)
 			continue;
 		bus = BUSBNO(todo[i].v.Vkey.tbdf);
 		dev = BUSDNO(todo[i].v.Vkey.tbdf);
-		p = seprint(p, e, "0x%x 0x%x\n", bus, dev);
+		fn = BUSFNO(todo[i].v.Vkey.tbdf);
+		p = seprint(p, e, "0x%x 0x%x 0x%x\n", bus, dev, fn);
 	}
 	return todostring;
 }
@@ -134,7 +140,7 @@ rtblput(Apic* apic, int sel, uint32_t hi, uint32_t lo)
 	ioapicwrite(apic, sel, lo);
 }
 
-Rdt*
+static Rdt*
 rdtlookup(Apic *apic, int intin)
 {
 	int i;
@@ -148,7 +154,8 @@ rdtlookup(Apic *apic, int intin)
 	return nil;
 }
 
-int compatible(uint32_t new, uint32_t old)
+static int
+compatible(uint32_t new, uint32_t old)
 {
 	uint32_t newtop = new & ~0xff;
 	uint32_t oldtop = old & ~0xff;
@@ -163,8 +170,9 @@ int compatible(uint32_t new, uint32_t old)
 	print("REALLY not the same\n");
 	return 0;
 }
-void
-ioapicintrinit(int busno, int apicno, int intin, int devno, uint32_t lo)
+
+static void
+ioapicintrinit(int busno, int apicno, int intin, int devno, int fno, uint32_t lo)
 {
 	Rbus *rbus;
 	Rdt *rdt;
@@ -194,29 +202,31 @@ ioapicintrinit(int busno, int apicno, int intin, int devno, uint32_t lo)
 	}
 
 	rdt = rdtlookup(apic, intin);
-	if(rdt == nil){
+	if (rdt == nil) {
 		rdt = &rdtarray[nrdtarray++];
 		rdt->apic = apic;
 		rdt->intin = intin;
 		rdt->lo = lo;
-	}else{
-		if(! compatible(lo, rdt->lo)){
+	} else {
+		if (!compatible(lo, rdt->lo)) {
 			print("ioapicintrinit: multiple irq botch bus %d %d/%d/%d lo %d vs %d\n",
 				busno, apicno, intin, devno, lo, rdt->lo);
 			return;
 		}
-		print("dup rdt %d %d %d %d %.8x\n", busno, apicno, intin, devno, lo);
+		print("ioapicintrinit: dup rdt %d %d %d %d %.8x\n", busno, apicno, intin, devno, lo);
 	}
 	rdt->ref++;
 	rbus = malloc(sizeof *rbus);
 	rbus->rdt = rdt;
 	rbus->devno = devno;
+	rbus->fno = fno;
 	rbus->next = rdtbus[busno];
 	rdtbus[busno] = rbus;
 	print("%s: success\n", __func__);
 }
 
-static int acpi_irq2ioapic(int irq)
+static int
+acpi_irq2ioapic(int irq)
 {
 	int ioapic_idx = 0;
 	Apic *apic;
@@ -254,7 +264,8 @@ static int acpi_irq2ioapic(int irq)
  *		like implementing a motherboard driver for each different motherboard,
  *		or some complex auto-detection scheme, or just configure PCI devices to
  *		use MSI instead). */
-static int acpi_make_rdt(Vctl *v, int tbdf, int irq, int busno, int devno)
+static int
+acpi_make_rdt(Vctl *v, int irq, int bustype, int busno, int devno, int fno)
 {
 	Atable *at;
 	Apicst *st, *lst;
@@ -274,6 +285,7 @@ static int acpi_make_rdt(Vctl *v, int tbdf, int irq, int busno, int devno)
 			}
 		}
 	}
+	
 	if (st) {
 		pol = map_polarity[st->intovr.flags & AFpmask];
 		if (pol < 0) {
@@ -288,16 +300,17 @@ static int acpi_make_rdt(Vctl *v, int tbdf, int irq, int busno, int devno)
 		lo = pol | edge_level;
 		gsi_irq = st->intovr.intr;
 	} else {
-		if (BUSTYPE(tbdf) == BusISA) {
+		if (bustype == BusISA) {
 			lo = IPhigh | TMedge;
 			gsi_irq = irq;
 		} else {
 			/* Need to query ACPI at some point to handle this */
 			print("Non-ISA IRQ %d not found in MADT, aborting\n", irq);
-			todo[(tbdf>>11)&0x1fff].v = *v;
-			todo[(tbdf>>11)&0x1fff].lo = lo | TMlevel | IPlow | Im;
-			todo[(tbdf>>11)&0x1fff].valid = 1;
-			print("Set todo[0x%x] to valid\n", (tbdf>>11)&0x1fff);
+			todo[todoidx].v = *v;
+			todo[todoidx].lo = lo | TMlevel | IPlow | Im;
+			todo[todoidx].valid = 1;
+			print("Set todo[0x%x] to valid\n", todoidx);
+			todoidx++;
 			return -1;
 		}
 	}
@@ -307,7 +320,7 @@ static int acpi_make_rdt(Vctl *v, int tbdf, int irq, int busno, int devno)
 		return -1;
 	}
 	ioapicintrinit(busno, ioapic_nr, gsi_irq - xioapic[ioapic_nr].Ioapic.gsib,
-	               devno, lo);
+	               devno, fno, lo);
 	return 0;
 }
 
@@ -379,9 +392,9 @@ ioapicdump(void)
 		print("iointr bus %d:\n", i);
 		for(; rbus != nil; rbus = rbus->next){
 			rdt = rbus->rdt;
-			print(" apic %ld devno %#x (%d %d) intin %d lo %#x ref %d\n",
+			print(" apic %ld devno %#x (%d %d) fno %d intin %d lo %#x ref %d\n",
 				rdt->apic-xioapic, rbus->devno, rbus->devno>>2,
-				rbus->devno & 0x03, rdt->intin, rdt->lo, rdt->ref);
+				rbus->devno & 0x03, rbus->fno, rdt->intin, rdt->lo, rdt->ref);
 		}
 	}
 }
@@ -483,7 +496,7 @@ ioapicintrdd(uint32_t* hi, uint32_t* lo)
 	*lo |= Pm|MTf;
 }
 
-int
+static int
 nextvec(void)
 {
 	uint vecno;
@@ -576,7 +589,8 @@ ioapicintrdisable(int vecno)
 }
 
 /* From Akaros, not sure we want this but for now ... */
-static int ioapic_exists(void)
+static int
+ioapic_exists(void)
 {
 	/* not foolproof, if we called this before parsing */
 	for (int i = 0; i < Napic; i++)
@@ -585,12 +599,14 @@ static int ioapic_exists(void)
 	return 0;
 }
 
-Rdt *rbus_get_rdt(int busno, int devno)
+static Rdt *
+rbus_get_rdt(int busno, int devno, int fno)
 {
 	Rbus *rbus;
 	for (rbus = rdtbus[busno]; rbus != nil; rbus = rbus->next) {
-		if (rbus->devno == devno)
+		if (rbus->devno == devno && rbus->fno == fno) {
 			return rbus->rdt;
+		}
 	}
 	return 0;
 }
@@ -611,16 +627,18 @@ Rdt *rbus_get_rdt(int busno, int devno)
  * In plan9, this was ioapicintrenable(), which also unmasked.  We don't have a
  * deinit/disable method that would tear down the route yet.  All the plan9 one
  * did was dec enabled and mask the entry. */
-int bus_irq_setup(Vctl *v)
+int
+bus_irq_setup(Vctl *v)
 {
 	//Rbus *rbus;
 	Rdt *rdt;
-	int busno = -1, devno = -1, vno;
+	int bustype = BUSTYPE(v->Vkey.tbdf);
+	int busno = -1, devno = -1, fno = 0, vno;
 	Pcidev *p;
 
        	if (!ioapic_exists()) {
 		panic("%s: no ioapics?", __func__);
-		switch (BUSTYPE(v->Vkey.tbdf)) {
+		switch (bustype) {
 			//case BusLAPIC:
 			//case BusIPI:
 			//break;
@@ -635,7 +653,7 @@ int bus_irq_setup(Vctl *v)
 			return -1; //irq_h->dev_irq + IdtPIC;
 		}
 	}
-	switch (BUSTYPE(v->Vkey.tbdf)) {
+	switch (bustype) {
 	case BusLAPIC:
 		/* nxm used to set the initial 'isr' method (i think equiv to our
 		 * check_spurious) to apiceoi for non-spurious lapic vectors.  in
@@ -686,19 +704,20 @@ int bus_irq_setup(Vctl *v)
 		 * we subtract 1, since the PCI intp maps 1 -> INTA, 2 -> INTB, etc,
 		 * and the MP spec uses 0 -> INTA, 1 -> INTB, etc. */
 		devno = BUSDNO(v->Vkey.tbdf) << 2 | (devno - 1);
+		fno = BUSFNO(v->Vkey.tbdf);
 		break;
 	default:
 		panic("Unknown bus type, TBDF %p", v->Vkey.tbdf);
 	}
 	/* busno and devno are set, regardless of the bustype, enough to find rdt.
 	 * these may differ from the values in tbdf. */
-	rdt = rbus_get_rdt(busno, devno);
+	rdt = rbus_get_rdt(busno, devno, fno);
 	if (!rdt) {
 		/* second chance.  if we didn't find the item the first time, then (if
 		 * it exists at all), it wasn't in the MP tables (or we had no tables).
 		 * So maybe we can figure it out via ACPI. */
-		acpi_make_rdt(v, v->Vkey.tbdf, v->Vkey.irq, busno, devno);
-		rdt = rbus_get_rdt(busno, devno);
+		acpi_make_rdt(v, v->Vkey.irq, bustype, busno, devno, fno);
+		rdt = rbus_get_rdt(busno, devno, fno);
 	}
 	if (!rdt) {
 		print("Unable to build IOAPIC route for irq %d\n", v->Vkey.irq);
@@ -742,34 +761,49 @@ int bus_irq_setup(Vctl *v)
 	return vno;
 }
 
-int acpiirq(uint32_t tbdf, int gsi)
+int
+acpiirq(uint32_t tbdf, int gsi)
 {
 	Proc *up = externup();
 	int ioapic_nr;
 	int busno = BUSBNO(tbdf);
 	int pin, devno;
-	int ix = (BUSBNO(tbdf) << 5) | BUSDNO(tbdf);
 	Pcidev *pcidev;
 	Vctl *v;
+	Vinfo *vinfotodo = nil;
+
 	int acpiintrenable(Vctl *v);
+	
 	/* for now we know it's PCI, just ignore what they told us. */
-	tbdf = MKBUS(BusPCI, busno, BUSDNO(tbdf), 0);
-	if((pcidev = pcimatchtbdf(tbdf)) == nil)
+	tbdf = MKBUS(BusPCI, busno, BUSDNO(tbdf), BUSFNO(tbdf));
+	if((pcidev = pcimatchtbdf(tbdf)) == nil) {
 		error("No such device (any more?)");
+	}
 	if((pin = pcicfgr8(pcidev, PciINTP)) == 0)
 		error("no INTP for that device, which is impossible");
 
 //	pcicfgw8(pcidev, PciINTL, gsi);
-	//print("ix is %x\n", ix);
-	if (!todo[ix].valid)
+	for (int i = 0; i < todoidx; i++) {
+		if (todo[i].v.Vkey.tbdf == tbdf) {
+			vinfotodo = &todo[i];
+			break;
+		}
+	}
+
+	print("acpiirq: writing b:%d d:%d f:%d gsi:%d\n", BUSBNO(tbdf), BUSDNO(tbdf), BUSFNO(tbdf), gsi);
+
+	if (vinfotodo == nil)
+		error("Unknown tbdf");
+	if (!vinfotodo->valid)
 		error("Invalid tbdf");
+
 	v = malloc(sizeof(*v));
 	if (waserror()) {
 		print("well, that went badly\n");
 		free(v);
 		nexterror();
 	}
-	*v = todo[ix].v;
+	*v = vinfotodo->v;
 	v->Vkey.irq = gsi;
 	devno = BUSDNO(v->Vkey.tbdf)<<2|(pin-1);
 	if (DBGFLG)
@@ -784,12 +818,12 @@ int acpiirq(uint32_t tbdf, int gsi)
 	}
 	//ioapicdump();
 	ioapicintrinit(busno, ioapic_nr, gsi - xioapic[ioapic_nr].Ioapic.gsib,
-	               devno, todo[ix].lo);
+	               devno, BUSFNO(tbdf), vinfotodo->lo);
 	if (DBGFLG)
 		print("ioapicinrinit seems to have worked\n");
 	poperror();
 
-	todo[ix].valid = 0;
+	vinfotodo->valid = 0;
 	//ioapicdump();
 	acpiintrenable(v);
 	//ioapicdump();

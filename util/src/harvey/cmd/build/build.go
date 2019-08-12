@@ -206,11 +206,32 @@ func adjust(s []string) []string {
 
 // return the given absolute path as an absolute path rooted at the harvey tree.
 func fromRoot(p string) string {
-	p = os.ExpandEnv(p)
-	if path.IsAbs(p) {
-		return path.Join(harvey, p)
+	expandedPath := os.ExpandEnv(p)
+	if path.IsAbs(expandedPath) {
+		expandedPath = path.Join(harvey, expandedPath)
 	}
-	return p
+
+	if strings.Contains(p, "$CC") {
+		// Travis has versioned CCs of the form clang-X.Y.  We don't want to have
+		// a file for each version of the compilers, so check if the versioned
+		// file exists first.  If it doesn't, fall back to the unversioned file.
+		expandedCc := os.Getenv("CC")
+		expandedCcTokens := strings.Split(expandedCc, "-")
+		fallbackCc := expandedCcTokens[0]
+		//fmt.Printf(">>>CC=%v fallback=%v\n", expandedCc, fallbackCc)
+		if len(expandedCcTokens) > 1 {
+			if _, err := os.Stat(expandedPath); err != nil {
+				if os.IsNotExist(err) {
+					oldCc := os.Getenv("CC")
+					os.Setenv("CC", fallbackCc)
+					expandedPath = fromRoot(p)
+					os.Setenv("CC", oldCc)
+				}
+			}
+		}
+	}
+
+	return expandedPath
 }
 
 func include(f string, targ string, b *build) {
@@ -280,7 +301,8 @@ func include(f string, targ string, b *build) {
 		for _, v := range build.SourceFiles {
 			b.SourceFiles = append(b.SourceFiles, v)
 			fi := path.Base(v)
-			o := fi[:len(fi)-1] + "o"
+			ext := path.Ext(v)
+			o := fi[:len(fi)-len(ext)+1] + "o"
 			b.ObjectFiles = append(b.ObjectFiles, o)
 		}
 
@@ -372,7 +394,8 @@ func process(f string, r []*regexp.Regexp) []build {
 
 		for _, v := range build.SourceFiles {
 			f := path.Base(v)
-			l := len(f) - 1
+			ext := path.Ext(f)
+			l := len(f) - len(ext) + 1
 			o := f[:l]
 			o += "o"
 			if !contains(build.ObjectFiles, o) {

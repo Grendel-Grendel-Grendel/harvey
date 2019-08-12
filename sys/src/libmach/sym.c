@@ -32,41 +32,42 @@ struct hist {				/* Stack of include files & #line directives */
 };
 
 struct file {				/* Per input file header to history stack */
-	uint64_t	addr;			/* address of first text sym */
+	uint64_t	addr;		/* address of first text sym */
 	union {
 		Txtsym	*txt;		/* first text symbol */
 		Sym	*sym;		/* only during initilization */
 	};
-	int	n;			/* size of history stack */
-	Hist	*hist;			/* history stack */
+	int		n;		/* size of history stack */
+	Hist		*hist;		/* history stack */
 };
 
-static	int	debug = 0;
+static	int		debug = 0;
 
-static	Sym	**autos;		/* Base of auto variables */
-static	File	*files;			/* Base of file arena */
-static	int	fmax;			/* largest file path index */
-static	Sym	**fnames;		/* file names path component table */
-static	Sym	**globals;		/* globals by addr table */
-static	Hist	*hist;			/* base of history stack */
-static	int	isbuilt;		/* internal table init flag */
-static	int32_t	nauto;			/* number of automatics */
-static	int32_t	nfiles;			/* number of files */
-static	int32_t	nglob;			/* number of globals */
-static	int32_t	nhist;			/* number of history stack entries */
-static	int32_t	nsym;			/* number of symbols */
-static	int	ntxt;			/* number of text symbols */
-static	uint8_t	*pcline;		/* start of pc-line state table */
-static	uint8_t 	*pclineend;		/* end of pc-line table */
-static	uint8_t	*spoff;			/* start of pc-sp state table */
-static	uint8_t	*spoffend;		/* end of pc-sp offset table */
-static	Sym	*symbols;		/* symbol table */
-static	Txtsym	*txt;			/* Base of text symbol table */
-static	uint64_t	txtstart;		/* start of text segment */
-static	uint64_t	txtend;			/* end of text segment */
+static	Sym		**autos;	/* Base of auto variables */
+static	File		*files;		/* Base of file arena */
+static	int		fmax;		/* largest file path index */
+static	Sym		**fnames;	/* file names path component table */
+static	Sym		**globals;	/* globals by addr table */
+static	Hist		*hist;		/* base of history stack */
+static	int		isbuilt;	/* internal table init flag */
+static	int32_t		nauto;		/* number of automatics */
+static	int32_t		nfiles;		/* number of files */
+static	int32_t		nglob;		/* number of globals */
+static	int32_t		nhist;		/* number of history stack entries */
+static	int32_t		nsym;		/* number of symbols */
+static	int		ntxt;		/* number of text symbols */
+static	uint8_t		*pcline;	/* start of pc-line state table */
+static	uint8_t 	*pclineend;	/* end of pc-line table */
+static	uint8_t		*spoff;		/* start of pc-sp state table */
+static	uint8_t		*spoffend;	/* end of pc-sp offset table */
+static	Sym		*symbols;	/* symbol table */
+static	char		*strings;	/* string table */
+static	Txtsym		*txt;		/* Base of text symbol table */
+static	uint64_t	txtstart;	/* start of text segment */
+static	uint64_t	txtend;		/* end of text segment */
 
 static void	cleansyms(void);
-static int32_t	decodename(Biobuf*, Sym*);
+//static int32_t	decodename(Biobuf*, Sym*);
 static int16_t	*encfname(char*);
 static int 	fline(char*, int, int32_t, Hist*, Hist**);
 static void	fillsym(Sym*, Symbol*);
@@ -78,7 +79,7 @@ static int	hline(File*, int16_t*, int32_t*);
 static void	printhist(char*, Hist*, int);
 static int	buildtbls(void);
 static int	symcomp(const void*, const void*);
-static int	symerrmsg(int, char*);
+//static int	symerrmsg(int, char*);
 static int	txtcomp(const void*, const void*);
 static int	filecomp(const void*, const void*);
 
@@ -88,11 +89,13 @@ static int	filecomp(const void*, const void*);
 int
 syminit(int fd, Fhdr *fp)
 {
-	Sym *p;
-	int32_t i, l, size;
-	int64_t vl;
-	Biobuf b;
-	int svalsz;
+	//Sym *p;
+	//int32_t i, l, size;
+	//int64_t vl;
+
+	uint16_t (*swab)(uint16_t) = fp->bigendian ? beswab : leswab;
+	uint32_t (*swal)(uint32_t) = fp->bigendian ? beswal : leswal;
+	uint64_t (*swav)(uint64_t) = fp->bigendian ? beswav : leswav;
 
 	if(fp->symsz == 0)
 		return 0;
@@ -101,41 +104,94 @@ syminit(int fd, Fhdr *fp)
 
 	cleansyms();
 	textseg(fp->txtaddr, fp);
-		/* minimum symbol record size = 4+1+2 bytes */
-	symbols = malloc((fp->symsz/(4+1+2)+1)*sizeof(Sym));
+	
+	nsym = fp->symsz / sizeof(E64Sym);
+
+	symbols = mallocz(nsym*sizeof(Sym), 1);
 	if(symbols == 0) {
-		werrstr("can't malloc %ld bytes", fp->symsz);
+		werrstr("can't allocate memory for symbol table");
 		return -1;
 	}
+
+	strings = malloc(fp->strsz);
+	if(strings == 0) {
+		werrstr("can't allocate memory to load string table");
+		return -1;
+	}
+
+	E64Sym *esyms = malloc(fp->symsz);
+	if(esyms == 0) {
+		werrstr("can't allocate memory to load symbol table");
+		free(esyms);
+		return -1;
+	}
+
+	Biobuf b;
 	Binit(&b, fd, OREAD);
 	Bseek(&b, fp->symoff, 0);
-	nsym = 0;
-	size = 0;
-	if((fp->_magic && (fp->magic & HDR_MAGIC)) || mach->szaddr == 8)
-		svalsz = 8;
-	else
-		svalsz = 4;
-	for(p = symbols; size < fp->symsz; p++, nsym++) {
-		if(svalsz == 8){
-			if(Bread(&b, &vl, 8) != 8)
-				return symerrmsg(8, "symbol");
-			p->value = beswav(vl);
-		}
-		else{
-			if(Bread(&b, &l, 4) != 4)
-				return symerrmsg(4, "symbol");
-			p->value = (uint32_t)beswal(l);
-		}
-		if(Bread(&b, &p->type, sizeof(p->type)) != sizeof(p->type))
-			return symerrmsg(sizeof(p->value), "symbol");
+	print("sizeof esyms: %d\n", fp->symsz);
+	if (Bread(&b, esyms, fp->symsz) != fp->symsz) {
+		werrstr("can't read symbol table");
+		free(esyms);
+		return -1;
+	}
 
-		i = decodename(&b, p);
-		if(i < 0)
-			return -1;
-		size += i+svalsz+sizeof(p->type);
+	print("stroff %p sizeof strings: %d\n", fp->stroff, fp->strsz);
+	Bseek(&b, fp->stroff, 0);
+	if (Bread(&b, strings, fp->strsz) != fp->strsz) {
+		werrstr("can't read string table");
+		free(esyms);
+		return -1;
+	}
+
+	print("symsz: %d, numsyms: %d strings: %p\n", fp->symsz, nsym, strings);
+
+	for (int i = 0; i < nsym; i++) {
+		esyms[i].st_name = swal(esyms[i].st_name);
+		esyms[i].st_shndx = swab(esyms[i].st_shndx);
+		esyms[i].st_value = swav(esyms[i].st_value);
+		esyms[i].st_size = swav(esyms[i].st_size);
+	}
+
+	// Skip first null symbol
+	for (int i = 1; i < nsym; i++) {
+		//print("i: %d val: %llx size: %d type: %d ndx: %d name %p\n", i, esyms[i].st_value, esyms[i].st_size, esyms[i].st_info, esyms[i].st_shndx, esyms[i].st_name);
+		if (esyms[i].st_name) {
+			symbols[i].name = &strings[esyms[i].st_name];
+		}
+		symbols[i].value = esyms[i].st_value;
+
+		uint8_t binding = esyms[i].st_info >> 4;
+		uint8_t symtype = esyms[i].st_info & 0xf;
+		uint16_t sectionidx = esyms[i].st_shndx;
+
+		// Try to translate ELF binding, symbol type information into
+		// old skool a.out symbol type chars.
+		switch (symtype) {
+		case STT_NOTYPE:
+			symbols[i].type = (binding == STB_GLOBAL) ? 'T' : 't';
+			break;
+		case STT_OBJECT:
+			if (sectionidx == fp->bssidx) {
+				symbols[i].type = (binding == STB_GLOBAL) ? 'B' : 'b';
+			} else {
+				symbols[i].type = (binding == STB_GLOBAL) ? 'D' : 'd';
+			}
+			break;
+		case STT_FUNC:
+			symbols[i].type = (binding == STB_GLOBAL) ? 'T' : 't';
+			break;
+		case STT_SECTION:
+			break;
+		case STT_FILE:
+			symbols[i].type = 'z';
+			break;
+		default:
+			break;
+		}
 
 		/* count global & auto vars, text symbols, and file names */
-		switch (p->type) {
+		switch (symbols[i].type) {
 		case 'l':
 		case 'L':
 		case 't':
@@ -149,12 +205,13 @@ syminit(int fd, Fhdr *fp)
 			nglob++;
 			break;
 		case 'f':
-			if(strcmp(p->name, ".frame") == 0) {
-				p->type = 'm';
+			// TODO valid?
+			if(strcmp(symbols[i].name, ".frame") == 0) {
+				symbols[i].type = 'm';
 				nauto++;
 			}
-			else if(p->value > fmax)
-				fmax = p->value;	/* highest path index */
+			else if(symbols[i].value > fmax)
+				fmax = symbols[i].value;	/* highest path index */
 			break;
 		case 'a':
 		case 'p':
@@ -162,18 +219,28 @@ syminit(int fd, Fhdr *fp)
 			nauto++;
 			break;
 		case 'z':
-			if(p->value == 1) {		/* one extra per file */
+			// TODO valid?
+			/*if(symbols[i].value == 1) {		// one extra per file
 				nhist++;
 				nfiles++;
-			}
+			}*/
+			nfiles++;
 			nhist++;
 			break;
 		default:
 			break;
 		}
+
+		//print("%05d %010lld type %c symtype %d binding %d %s\n", i, symbols[i].value, symbols[i].type, symtype, binding, symbols[i].name);
 	}
+
+	//print("ntxt: %d, nglob: %d, nauto: %d, fmax: %d, nfiles: %d, nhist: %d\n", ntxt, nglob, nauto, fmax, nfiles, nhist);
+
+	free(esyms);
+
 	if (debug)
 		print("NG: %ld NT: %d NF: %d\n", nglob, ntxt, fmax);
+#if 0
 	if (fp->sppcsz) {			/* pc-sp offset table */
 		spoff = (uint8_t *)malloc(fp->sppcsz);
 		if(spoff == 0) {
@@ -200,9 +267,11 @@ syminit(int fd, Fhdr *fp)
 		}
 		pclineend = pcline+fp->lnpcsz;
 	}
+#endif // 0
 	return nsym;
 }
 
+#if 0
 static int
 symerrmsg(int n, char *table)
 {
@@ -274,7 +343,7 @@ decodename(Biobuf *bp, Sym *p)
 	}
 	return n;
 }
-
+#endif // 0
 /*
  *	free any previously loaded symbol tables
  */
@@ -310,6 +379,9 @@ cleansyms(void)
 	if(symbols)
 		free(symbols);
 	symbols = 0;
+	if(strings)
+		free(strings);
+	strings = 0;
 	nsym = 0;
 	if(spoff)
 		free(spoff);
@@ -361,8 +433,10 @@ buildtbls(void)
 	int j, nh, ng, nt;
 	File *f;
 	Txtsym *tp;
-	Hist *hp;
+	//Hist *hp;
 	Sym *p, **ap;
+
+	//print("ntxt: %d, nglob: %d, nauto: %d, fmax: %d, nfiles: %d, nhist: %d\n", ntxt, nglob, nauto, fmax, nfiles, nhist);
 
 	if(isbuilt)
 		return 1;
@@ -407,10 +481,12 @@ buildtbls(void)
 	ng = nt = nh = 0;
 	f = 0;
 	tp = 0;
-	i = nsym;
-	hp = hist;
+	//hp = hist;
 	ap = autos;
-	for(p = symbols; i-- > 0; p++) {
+
+	// Skip first null symbol
+	for (i = 1; i < nsym; i++) {
+		p = &symbols[i];
 		switch(p->type) {
 		case 'D':
 		case 'd':
@@ -420,35 +496,35 @@ buildtbls(void)
 				print("Global: %s %llx\n", p->name, p->value);
 			globals[ng++] = p;
 			break;
-		case 'z':
-			if(p->value == 1) {		/* New file */
+		/*case 'z':
+			if(p->value == 1) {		// New file
 				if(f) {
 					f->n = nh;
-					f->hist[nh].name = 0;	/* one extra */
+					f->hist[nh].name = 0;	// one extra
 					hp += nh+1;
 					f++;
-				}
-				else
+				} else {
 					f = files;
+				}
 				f->hist = hp;
 				f->sym = 0;
 				f->addr = 0;
 				nh = 0;
 			}
-				/* alloc one slot extra as terminator */
+				// alloc one slot extra as terminator
 			f->hist[nh].name = p->name;
 			f->hist[nh].line = p->value;
 			f->hist[nh].offset = 0;
 			if(debug)
 				printhist("-> ", &f->hist[nh], 1);
 			nh++;
-			break;
+			break;*/
 		case 'Z':
 			if(f && nh > 0)
 				f->hist[nh-1].offset = p->value;
 			break;
 		case 'T':
-		case 't':	/* Text: terminate history if first in file */
+		case 't':	// Text: terminate history if first in file
 		case 'L':
 		case 'l':
 			tp = &txt[nt++];
@@ -456,15 +532,15 @@ buildtbls(void)
 			tp->sym = p;
 			tp->locals = ap;
 			if(debug)
-				print("TEXT: %s at %llx\n", p->name, p->value);
-			if(f && !f->sym) {			/* first  */
+				print("TEXT: %s at %llx (idx: %d)\n", p->name, p->value, i);
+			if(f && !f->sym) {			// first
 				f->sym = p;
 				f->addr = p->value;
 			}
 			break;
 		case 'a':
 		case 'p':
-		case 'm':		/* Local Vars */
+		case 'm':		// Local Vars
 			if(!tp)
 				print("Warning: Free floating local var: %s\n",
 					p->name);
@@ -476,7 +552,7 @@ buildtbls(void)
 				ap++;
 			}
 			break;
-		case 'f':		/* File names */
+		case 'f':		// File names
 			if(debug)
 				print("Fname: %s\n", p->name);
 			fnames[p->value] = p;
@@ -544,9 +620,7 @@ lookup(char *fn, char *var, Symbol *s)
 static int
 findtext(char *name, Symbol *s)
 {
-	int i;
-
-	for(i = 0; i < ntxt; i++) {
+	for(int i = 0; i < ntxt; i++) {
 		if(strcmp(txt[i].sym->name, name) == 0) {
 			fillsym(txt[i].sym, s);
 			s->handle = (void *) &txt[i];
@@ -562,9 +636,7 @@ findtext(char *name, Symbol *s)
 static int
 findglobal(char *name, Symbol *s)
 {
-	int32_t i;
-
-	for(i = 0; i < nglob; i++) {
+	for(int i = 0; i < nglob; i++) {
 		if(strcmp(globals[i]->name, name) == 0) {
 			fillsym(globals[i], s);
 			s->index = i;
@@ -594,18 +666,16 @@ findlocal(Symbol *s1, char *name, Symbol *s2)
 static int
 findlocvar(Symbol *s1, char *name, Symbol *s2)
 {
-	Txtsym *tp;
-	int i;
-
-	tp = (Txtsym *)s1->handle;
+	Txtsym *tp  = (Txtsym *)s1->handle;
 	if(tp && tp->locals) {
-		for(i = 0; i < tp->n; i++)
+		for(int i = 0; i < tp->n; i++) {
 			if (strcmp(tp->locals[i]->name, name) == 0) {
 				fillsym(tp->locals[i], s2);
 				s2->handle = (void *)tp;
 				s2->index = tp->n-1 - i;
 				return 1;
 			}
+		}
 	}
 	return 0;
 }
@@ -616,7 +686,6 @@ findlocvar(Symbol *s1, char *name, Symbol *s2)
 int
 textsym(Symbol *s, int index)
 {
-
 	if(buildtbls() == 0)
 		return 0;
 	if(index < 0 || index >= ntxt)
